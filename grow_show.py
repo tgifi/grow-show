@@ -1,5 +1,18 @@
 import asyncio
 import platform
+import os
+import sys
+
+# IMPORTANT: Replace this with your actual VLC installation path!
+# Example paths:
+#   vlc_path = r"C:\Program Files\VideoLAN\VLC"   # 64-bit default
+#   vlc_path = r"C:\Program Files (x86)\VideoLAN\VLC" # 32-bit default
+
+vlc_path = r""
+
+# This adds the VLC directory to the system's DLL search path for the script
+os.add_dll_directory(vlc_path)
+
 import vlc
 import streamlink
 import requests
