@@ -16,8 +16,8 @@ A Twitch shoutout player that grows, and then shows
    1. `pip install streamlink`
    2. `pip install twitchAPI`
    3. `pip install python-vlc`
-3. In `grow_show.py` update
-   1. `vlc_path` to the directory containing your VLC installaion
+3. Copy example_config.py to config.py and update
+   1. `vlc_path` to the directory containing your VLC installation
    2. `CLIENT_ID` to the client ID of your Twitch app
    3. `CLIENT_SECRET` to the token created during creation of the Twitch app
    4. `CHANNEL` to your Twitch channel name

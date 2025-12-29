@@ -1,18 +1,10 @@
 import asyncio
-import platform
+import config
 import os
-import sys
-
-# IMPORTANT: Replace this with your actual VLC installation path!
-# Example paths:
-#   vlc_path = r"C:\Program Files\VideoLAN\VLC"   # 64-bit default
-#   vlc_path = r"C:\Program Files (x86)\VideoLAN\VLC" # 32-bit default
-
-vlc_path = r""
-
+import platform
 # This adds the VLC directory to the system's DLL search path for the script
-os.add_dll_directory(vlc_path)
-
+if config.VLC_PATH:
+    os.add_dll_directory(config.VLC_PATH)
 import vlc
 import streamlink
 import requests
@@ -20,21 +12,10 @@ import tkinter as tk
 from collections import deque
 from random import random, choice
 
-from twitchAPI.type import AuthScope, ChatEvent
+from twitchAPI.type import ChatEvent
 from twitchAPI.twitch import Twitch
 from twitchAPI.oauth import UserAuthenticator
 from twitchAPI.chat import Chat, EventData, ChatCommand
-
-# --- Configuration ---
-CONFIG = {
-    "CLIENT_ID": "",
-    "CLIENT_SECRET": "",
-    "CHANNEL": "",
-    "SCOPES": [AuthScope.CHAT_READ, AuthScope.CHAT_EDIT],
-    "MIN_WINDOW_SIZE": (400, 10), # Small initial size
-    "MAX_VIDEO_WIDTH": 800,
-    "RESIZE_SMOOTHNESS": 0.007
-}
 
 class TwitchClipPlayer(tk.Frame):
     """A VLC-powered video player embedded in Tkinter that handles Twitch clip playback."""
@@ -50,9 +31,10 @@ class TwitchClipPlayer(tk.Frame):
 
         # State Management
         self.queue = deque()
+        self.is_resizing = False
         self.is_playing = False
         self.initial_size_set = False # <--- NEW: Flag to control initial size jump
-        self.current_w, self.current_h = CONFIG["MIN_WINDOW_SIZE"]
+        self.current_w, self.current_h = config.CONFIG["MIN_WINDOW_SIZE"]
         
         # Event Listeners
         event_manager = self.player.event_manager()
@@ -79,22 +61,22 @@ class TwitchClipPlayer(tk.Frame):
 
         # If VLC hasn't loaded dimensions yet, return a safe size.
         if video_w <= 0:
-            return CONFIG["MAX_VIDEO_WIDTH"], 450
+            return config.CONFIG["MAX_VIDEO_WIDTH"], 450
         
-        scale_factor = CONFIG["MAX_VIDEO_WIDTH"] / video_w
+        scale_factor = config.CONFIG["MAX_VIDEO_WIDTH"] / video_w
         return int(video_w * scale_factor), int(video_h * scale_factor)
 
     def _update_ui_geometry(self):
         """Smoothly interpolates window size towards the target dimensions."""
         
-        if self.is_playing:
+        if self.is_resizing:
             target_w, target_h = self._get_scaled_dimensions()
             
             # --- START OF FIX: Only initialize size once we have the target dimensions ---
             if not self.initial_size_set and target_w > 0 and target_h > 0:
                 
                 # 1. Reset to minimum size to ensure a smooth scale-up
-                self.current_w, self.current_h = CONFIG["MIN_WINDOW_SIZE"]
+                self.current_w, self.current_h = config.CONFIG["MIN_WINDOW_SIZE"]
                 
                 # 2. Apply 10% 'chaos' shrink to the STARTING dimensions (if triggered)
                 if random() < 0.1: 
@@ -111,10 +93,10 @@ class TwitchClipPlayer(tk.Frame):
                 # Smooth interpolation for a 'growing' window effect
                 if self.current_w < target_w:
                     # Calculate step size based on the remaining difference
-                    self.current_w += max(1, (target_w - self.current_w) * CONFIG["RESIZE_SMOOTHNESS"])
+                    self.current_w += max(1, (target_w - self.current_w) * config.CONFIG["RESIZE_SMOOTHNESS"])
                 
                 if self.current_h < target_h:
-                    self.current_h += max(1, (target_h - self.current_h) * CONFIG["RESIZE_SMOOTHNESS"])
+                    self.current_h += max(1, (target_h - self.current_h) * config.CONFIG["RESIZE_SMOOTHNESS"])
                 
                 # Apply the current interpolated size
                 self.master.geometry(f"{int(self.current_w)}x{int(self.current_h)}")
@@ -140,6 +122,7 @@ class TwitchClipPlayer(tk.Frame):
         if not self.queue:
             self.is_playing = False
             return
+        self.is_playing = True
 
         url = self.queue.popleft()
         media = self.vlc_instance.media_new(url)
@@ -149,24 +132,25 @@ class TwitchClipPlayer(tk.Frame):
         self.initial_size_set = False 
         
         # Reset to MIN size before playback starts, just in case
-        self.current_w, self.current_h = CONFIG["MIN_WINDOW_SIZE"]
+        self.current_w, self.current_h = config.CONFIG["MIN_WINDOW_SIZE"]
         self.master.geometry(f"{self.current_w}x{self.current_h}")
         
         self.player.play()
         
-        # Delay marking as playing. This delay gives VLC enough time to load the
+        # Delay marking as resizing. This delay gives VLC enough time to load the
         # video's actual dimensions (width/height) before the geometry loop starts interpolating.
-        self.after(3000, self._set_playing_state, True)
+        self.after(3000, self._set_resizing_state, True)
 
-    def _set_playing_state(self, state: bool):
-        self.is_playing = state
+    def _set_resizing_state(self, state: bool):
+        self.is_resizing = state
 
     def _handle_video_end(self, event):
         """Resets window and prepares for next clip."""
         self.initial_size_set = False # Reset flag for the next clip
-        self.current_w, self.current_h = CONFIG["MIN_WINDOW_SIZE"]
+        self.current_w, self.current_h = config.CONFIG["MIN_WINDOW_SIZE"]
         self.master.geometry(f"{self.current_w}x{self.current_h}")
         self.is_playing = False
+        self.is_resizing = False
         # Brief pause before next clip
         self.after(30, self._play_next_in_queue)
 
@@ -174,6 +158,7 @@ class TwitchClipPlayer(tk.Frame):
         self.player.stop()
         self.queue.clear()
         self.is_playing = False
+        self.is_resizing = False
 
 class TwitchBot:
     """Handles Twitch API authentication and Shoutout command logic."""
@@ -185,11 +170,11 @@ class TwitchBot:
         self.token = None
 
     async def start(self):
-        self.twitch = await Twitch(CONFIG["CLIENT_ID"], CONFIG["CLIENT_SECRET"])
-        auth = UserAuthenticator(self.twitch, CONFIG["SCOPES"])
+        self.twitch = await Twitch(config.CONFIG["CLIENT_ID"], config.CONFIG["CLIENT_SECRET"])
+        auth = UserAuthenticator(self.twitch, config.CONFIG["SCOPES"])
         # NOTE: Authentication step is blocking and may require browser interaction
         self.token, refresh_token = await auth.authenticate() 
-        await self.twitch.set_user_authentication(self.token, CONFIG["SCOPES"], refresh_token)
+        await self.twitch.set_user_authentication(self.token, config.CONFIG["SCOPES"], refresh_token)
         
         self.chat = await Chat(self.twitch)
         self.chat.register_event(ChatEvent.READY, self._on_ready)
@@ -197,12 +182,12 @@ class TwitchBot:
         self.chat.start()
 
     async def _on_ready(self, ready_event: EventData):
-        print(f"Bot connected to Twitch. Joining #{CONFIG['CHANNEL']}")
-        await ready_event.chat.join_room(CONFIG["CHANNEL"])
+        print(f"Bot connected to Twitch. Joining #{config.CONFIG['CHANNEL']}")
+        await ready_event.chat.join_room(config.CONFIG["CHANNEL"])
 
     def _get_random_clip_id(self, username):
         headers = {
-            'Client-ID': CONFIG["CLIENT_ID"],
+            'Client-ID': config.CONFIG["CLIENT_ID"],
             'Authorization': f'Bearer {self.token}'
         }
         # Get User ID
@@ -238,7 +223,7 @@ class TwitchBot:
 def run_app():
     root = tk.Tk()
     root.title("Twitch Clip SO")
-    root.geometry(f"{CONFIG['MIN_WINDOW_SIZE'][0]}x{CONFIG['MIN_WINDOW_SIZE'][1]}")
+    root.geometry(f"{config.CONFIG['MIN_WINDOW_SIZE'][0]}x{config.CONFIG['MIN_WINDOW_SIZE'][1]}")
     
     player_ui = TwitchClipPlayer(root)
     bot = TwitchBot(player_ui)
