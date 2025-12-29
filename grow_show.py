@@ -31,7 +31,7 @@ CONFIG = {
     "CLIENT_SECRET": "",
     "CHANNEL": "",
     "SCOPES": [AuthScope.CHAT_READ, AuthScope.CHAT_EDIT],
-    "MIN_WINDOW_SIZE": (400, 10),
+    "MIN_WINDOW_SIZE": (400, 10), # Small initial size
     "MAX_VIDEO_WIDTH": 800,
     "RESIZE_SMOOTHNESS": 0.007
 }
@@ -44,13 +44,14 @@ class TwitchClipPlayer(tk.Frame):
         self.pack(fill="both", expand=True)
 
         # VLC Setup
-        self.vlc_instance = vlc.Instance()
+        self.vlc_instance = vlc.Instance("--vout=opengl")
         self.player = self.vlc_instance.media_player_new()
         self._attach_window_handle()
 
         # State Management
         self.queue = deque()
         self.is_playing = False
+        self.initial_size_set = False # <--- NEW: Flag to control initial size jump
         self.current_w, self.current_h = CONFIG["MIN_WINDOW_SIZE"]
         
         # Event Listeners
@@ -76,34 +77,61 @@ class TwitchClipPlayer(tk.Frame):
         video_w = self.player.video_get_width()
         video_h = self.player.video_get_height()
 
-        if video_w > 0:
-            scale_factor = CONFIG["MAX_VIDEO_WIDTH"] / video_w
-            return int(video_w * scale_factor), int(video_h * scale_factor)
-        return CONFIG["MAX_VIDEO_WIDTH"], 450
+        # If VLC hasn't loaded dimensions yet, return a safe size.
+        if video_w <= 0:
+            return CONFIG["MAX_VIDEO_WIDTH"], 450
+        
+        scale_factor = CONFIG["MAX_VIDEO_WIDTH"] / video_w
+        return int(video_w * scale_factor), int(video_h * scale_factor)
 
     def _update_ui_geometry(self):
         """Smoothly interpolates window size towards the target dimensions."""
+        
         if self.is_playing:
             target_w, target_h = self._get_scaled_dimensions()
             
-            # Smooth interpolation for a 'growing' window effect
-            if self.current_w < target_w:
-                self.current_w += max(0, (target_w - self.current_w) * CONFIG["RESIZE_SMOOTHNESS"])
-            if self.current_h < target_h:
-                self.current_h += max(0, (target_h - self.current_h) * CONFIG["RESIZE_SMOOTHNESS"])
-            
-            self.master.geometry(f"{int(self.current_w)}x{int(self.current_h)}")
-            
+            # --- START OF FIX: Only initialize size once we have the target dimensions ---
+            if not self.initial_size_set and target_w > 0 and target_h > 0:
+                
+                # 1. Reset to minimum size to ensure a smooth scale-up
+                self.current_w, self.current_h = CONFIG["MIN_WINDOW_SIZE"]
+                
+                # 2. Apply 10% 'chaos' shrink to the STARTING dimensions (if triggered)
+                if random() < 0.1: 
+                    self.current_w = target_w * 0.25
+                    self.current_h = target_h * 0.25
+
+                # 3. Set the initial window geometry immediately to the small size
+                self.master.geometry(f"{int(self.current_w)}x{int(self.current_h)}")
+                
+                self.initial_size_set = True # Now we are ready to start interpolation
+            # --- END OF FIX ---
+
+            if self.initial_size_set:
+                # Smooth interpolation for a 'growing' window effect
+                if self.current_w < target_w:
+                    # Calculate step size based on the remaining difference
+                    self.current_w += max(1, (target_w - self.current_w) * CONFIG["RESIZE_SMOOTHNESS"])
+                
+                if self.current_h < target_h:
+                    self.current_h += max(1, (target_h - self.current_h) * CONFIG["RESIZE_SMOOTHNESS"])
+                
+                # Apply the current interpolated size
+                self.master.geometry(f"{int(self.current_w)}x{int(self.current_h)}")
+                
         self.after(10, self._update_ui_geometry)
 
     def queue_clip(self, slug):
         """Fetches the stream URL and adds it to the playback queue."""
         try:
+            # Use streamlink to get the direct stream URL
             streams = streamlink.streams(f"https://clips.twitch.tv/{slug}")
             if "best" in streams:
                 self.queue.append(streams["best"].url)
                 if not self.is_playing:
                     self._play_next_in_queue()
+            else:
+                 print(f"Error: Could not find 'best' stream quality for clip {slug}")
         except Exception as e:
             print(f"Error fetching clip {slug}: {e}")
 
@@ -117,16 +145,17 @@ class TwitchClipPlayer(tk.Frame):
         media = self.vlc_instance.media_new(url)
         self.player.set_media(media)
 
-        # Trigger initial size and random 'chaos' shrink
-        self.current_w, self.current_h = self._get_scaled_dimensions()
-        if random() < 0.1: # 10% chance of 'mini-mode'
-            self.current_w *= 0.25
-            self.current_h *= 0.25
-
-        self.master.geometry(f"{int(self.current_w)}x{int(self.current_h)}")
+        # --- CHANGE: Reset the flag but DO NOT set the size here ---
+        self.initial_size_set = False 
+        
+        # Reset to MIN size before playback starts, just in case
+        self.current_w, self.current_h = CONFIG["MIN_WINDOW_SIZE"]
+        self.master.geometry(f"{self.current_w}x{self.current_h}")
+        
         self.player.play()
         
-        # Delay marking as playing to let VLC load video dimensions
+        # Delay marking as playing. This delay gives VLC enough time to load the
+        # video's actual dimensions (width/height) before the geometry loop starts interpolating.
         self.after(3000, self._set_playing_state, True)
 
     def _set_playing_state(self, state: bool):
@@ -134,6 +163,7 @@ class TwitchClipPlayer(tk.Frame):
 
     def _handle_video_end(self, event):
         """Resets window and prepares for next clip."""
+        self.initial_size_set = False # Reset flag for the next clip
         self.current_w, self.current_h = CONFIG["MIN_WINDOW_SIZE"]
         self.master.geometry(f"{self.current_w}x{self.current_h}")
         self.is_playing = False
@@ -157,7 +187,8 @@ class TwitchBot:
     async def start(self):
         self.twitch = await Twitch(CONFIG["CLIENT_ID"], CONFIG["CLIENT_SECRET"])
         auth = UserAuthenticator(self.twitch, CONFIG["SCOPES"])
-        self.token, refresh_token = await auth.authenticate()
+        # NOTE: Authentication step is blocking and may require browser interaction
+        self.token, refresh_token = await auth.authenticate() 
         await self.twitch.set_user_authentication(self.token, CONFIG["SCOPES"], refresh_token)
         
         self.chat = await Chat(self.twitch)
@@ -216,18 +247,30 @@ def run_app():
     
     def process_async_queue():
         """Allows the asyncio loop to run alongside Tkinter."""
-        loop.stop()
-        loop.run_forever()
-        root.after(10, process_async_queue)
+        # Stop the event loop to check if the main window is still open
+        loop.stop() 
+        try:
+             # Run pending tasks on the event loop
+            loop.run_until_complete(asyncio.sleep(0))
+        except RuntimeError:
+             # Handle the case where the loop is closed before all tasks run
+            pass
+        
+        if root.winfo_exists():
+            root.after(10, process_async_queue) # Schedule next run
 
     def on_closing():
         player_ui.shutdown()
-        loop.run_until_complete(bot.stop())
+        # Shut down the asyncio loop and the bot gracefully
+        loop.run_until_complete(bot.stop()) 
+        loop.close()
         root.destroy()
 
     # Initialization
-    loop.run_until_complete(bot.start())
+    # Start the bot and the chat system
+    loop.run_until_complete(bot.start()) 
     root.protocol("WM_DELETE_WINDOW", on_closing)
+    # Start the continuous loop to process asyncio tasks
     root.after(10, process_async_queue)
     root.mainloop()
 
